@@ -50,17 +50,14 @@ st.write(f"Aplikace čerpá překlady pro dodavatele **{DODAVATEL}** z GitHubu. 
 if "all_sheets" not in st.session_state:
     st.session_state.all_sheets = {}
 
-# --- AUTOMATICKÉ NAČTENÍ KOMPLETNÍHO EXCELU JAKO ČISTÝ TEXT ---
+# --- AUTOMATICKÉ NAČTENÍ KOMPLETNÍHO EXCELU JAKO ČISTÝ TEXT (ŘEŠÍ CHYBU FLOAT64) ---
 if not st.session_state.all_sheets:
     try:
         with st.spinner("🔄 Načítám kompletní překladovou databázi z GitHubu..."):
-            # Otevřeme soubor přes ExcelFile, abychom zmapovali strukturu
             excel_file = pd.ExcelFile(GITHUB_EXCEL_URL)
             for sheet in excel_file.sheet_names:
-                # ⭐ KLÍČOVÁ OPRAVA: Vynutíme dtype=str pro VŠECHNY sloupce při načítání, což smaže chybu float64
+                # Vynutíme typ textu (str) pro absolutně všechny buňky, aby prázdná políčka nepadala
                 df_sheet = pd.read_excel(GITHUB_EXCEL_URL, sheet_name=sheet, dtype=str)
-                
-                # Vyčistíme prázdné hodnoty na čisté textové řetězce
                 df_sheet = df_sheet.fillna("").astype(str)
                 for col in df_sheet.columns:
                     df_sheet[col] = df_sheet[col].str.strip()
@@ -75,7 +72,7 @@ if not st.session_state.all_sheets:
 sheet_data = f"DATA-{DODAVATEL}"
 sheet_var = f"VAR-{DODAVATEL}"
 
-# Pojistka pro případ, že by záložky v Excelu chyběly (vytvoří prázdné s textovými sloupci)
+# Pojistky pro případ chybějících listů na GitHubu
 if sheet_data not in st.session_state.all_sheets:
     st.session_state.all_sheets[sheet_data] = pd.DataFrame(columns=["název", "PL"]).astype(str)
 if sheet_var not in st.session_state.all_sheets:
@@ -97,7 +94,7 @@ if uploaded_orders1:
             seznam_df_orders.append(pd.read_excel(uploaded_orders2))
         df_orders = pd.concat(seznam_df_orders, ignore_index=True)
 
-        # DYNAMICKÁ FILTRACE PODLE VYBRANÉHO DODAVATELE
+        # Filtrace podle aktuálně vybraného dodavatele
         filtr = (
             (df_orders["orderItemType"] == "product")
             & (df_orders["orderItemSupplier"] == DODAVATEL)
@@ -127,25 +124,21 @@ if uploaded_orders1:
             if radky_ke_smazani:
                 df_filtrovane = df_filtrovane.drop(index=radky_ke_smazani)
 
-            # Příprava dat pro kontrolu překladů
+            # Příprava dat pro párování
             df_check = df_filtrovane[["code", "orderItemName", "orderItemAmount", "orderItemVariantName"]].copy()
             df_check["orderItemName"] = df_check["orderItemName"].astype(str).str.strip()
             df_check["orderItemVariantName"] = df_check["orderItemVariantName"].fillna("").astype(str).str.strip()
 
-            # Vytvoření čistě textových slovníků z paměti aplikace
+            # Textové slovníky z paměti aplikace
             slovnik_prod = dict(zip(st.session_state.all_sheets[sheet_data]["název"], st.session_state.all_sheets[sheet_data]["PL"]))
             slovnik_var = dict(zip(st.session_state.all_sheets[sheet_var]["VAR"], st.session_state.all_sheets[sheet_var]["PL"]))
             slovnik_lab = dict(zip(st.session_state.all_sheets["LABELS"]["NAME"], st.session_state.all_sheets["LABELS"]["PCS"]))
 
-            df_check["orderItemName_PL"] = df_check["orderItemName"].map(slovnik_prod)
-            df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName"].map(slovnik_var)
+            df_check["orderItemName_PL"] = df_check["orderItemName"].map(slovnik_prod).fillna("")
+            df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName"].map(slovnik_var).fillna("")
             df_check.loc[df_check["orderItemVariantName"] == "", "orderItemVariantName_PL"] = ""
 
-            # Ochrana prázdných hodnot po mapování
-            df_check["orderItemName_PL"] = df_check["orderItemName_PL"].replace("", None).fillna("")
-            df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName_PL"].replace("", None).fillna("")
-
-            # Detekce chybějících položek
+            # Detekce chybějících překladů
             chybi_prod = df_check[df_check["orderItemName_PL"] == ""]["orderItemName"].unique()
             chybi_var = df_check[(df_check["orderItemVariantName_PL"] == "") & (df_check["orderItemVariantName"] != "")]["orderItemVariantName"].unique()
 
@@ -158,9 +151,9 @@ if uploaded_orders1:
             df_check["baliky_pcs"] = df_check["orderItemName_PL_clean"].map(slovnik_lab).fillna("")
             chybi_lab = df_check[(df_check["baliky_pcs"] == "") & (df_check["orderItemName_PL_clean"] != "")]["orderItemName_PL_clean"].unique()
 
-            # --- FORMULÁŘE PRO DOPLNĚNÍ (ZDE TO PADALO, NYNÍ OŠETŘENO) ---
+            # --- AUTOFILS FORMULÁŘE PRO CHYBĚJÍCÍ POLOŽKY ---
             if len(chybi_prod) > 0 or len(chybi_var) > 0 or len(chybi_lab) > 0:
-                st.error(f"🛑 V online databázi ({DODAVATEL}) chybí položky z nových objednávek! Vyplňte je zde:")
+                st.error(f"🛑 V online databázi ({DODAVATEL}) chybí položky! Vyplňte je zde:")
                 
                 if len(chybi_prod) > 0:
                     st.warning("➕ Chybějící PŘEKLADY PRODUKTŮ:")
@@ -229,7 +222,8 @@ if uploaded_orders1:
                 style_main = ParagraphStyle('Main', parent=styles['Normal'], fontName=FONT_BOLD, fontSize=11, leading=13)
                 style_pl = ParagraphStyle('PL', parent=styles['Normal'], fontName=FONT_NORMAL, fontSize=8.5, leading=10, textColor=colors.HexColor('#555555'))
 
-                fraze_ke_smazani = ["se zásuvkou", "s úložným prostorem", "včetně roštu", " matrace"]
+                # ⭐ DŮLEŽITÁ ÚPRAVA: TVŮJ NOVÝ SEZNAM FRÁZÍ KE SMAZÁNÍ
+                fraze_ke_smazani = ["Zvolte barvu:: ", "Zvolte rozměr:: ", "Zvolte variantu:: ", "Barva: ", "Rozměr: "]
                 
                 bunky_stitku = []
                 for _, row in df_final.iterrows():
@@ -239,9 +233,12 @@ if uploaded_orders1:
                     for i_postele in range(1, mnozstvi_objednano + 1):
                         for a_balik in range(1, baliku_na_produkt + 1):
                             
+                            # ⭐ Odmazání předpon z Shoptetu z textu české varianty
                             cz_var_cista = cz_var
                             for fraze in fraze_ke_smazani:
                                 cz_var_cista = re.sub(re.escape(fraze), "", cz_var_cista, flags=re.IGNORECASE)
+                            
+                            # Výsledné začištění (vymaže přebytečné čárky a mezery na krajích)
                             cz_var_cista = cz_var_cista.replace(", ,", ",").strip(", ").strip()
                             
                             cz_text = f"{cz_nazev} - {cz_var_cista}" if cz_var_cista else cz_nazev
@@ -275,7 +272,7 @@ if uploaded_orders1:
                 mrizka_tabulka.setStyle(TableStyle(t_style))
                 doc.build([mrizka_tabulka])
 
-                st.download_button(label=f"🔵 Stáhnout štítky {DODAVATEL} 2x7 (PDF)", data=pdf_buffer.getvalue(), file_name=f"stitky_{DODAVATEL}.pdf")
+                st.download_button(label="🔵 Stáhnout tiskové štítky 2x7 (PDF)", data=pdf_buffer.getvalue(), file_name=f"stitky_{DODAVATEL}.pdf")
                 st.balloons()
 
     except Exception as e:
@@ -294,16 +291,16 @@ with tab3:
     st.session_state.all_sheets["LABELS"] = st.data_editor(st.session_state.all_sheets["LABELS"], num_rows="dynamic", use_container_width=True, key="edit_lab_global")
 
 st.markdown("### 💾 Stažení kompletního aktualizovaného Excelu")
-st.write("Po úpravách stáhněte soubor a nahrajte jej zpět na GitHub repozitář. Budou v něm stoprocentně zachováni všichni dodavatelé.")
+st.write("Po jakýchkoliv úpravách stáhněte tento soubor a nahrajte jej zpět na GitHub repozitář. Budou v něm stoprocentně zachováni všichni dodavatelé.")
 
 export_buffer = io.BytesIO()
 with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
-    # ⭐ BEZPEČNÝ ZÁPIS: Uložíme všechny listy z vnitřní paměti aplikace najednou, aby se žádný nesmazal
+    # Uložíme všechny dostupné listy z paměti aplikace najednou, aby se žádný dodavatel nesmazal
     for s_name, df_s in st.session_state.all_sheets.items():
         df_s.to_excel(writer, sheet_name=s_name, index=False)
         
 st.download_button(
-    label="📥 STÁHNOUT SOUBOR TRANSLATE-PL.XLSX SE ZMÊNAMI",
+    label="📥 STÁHNOUT SOUBOR TRANSLATE-PL.XLSX SE ZMĚNAMI",
     data=export_buffer.getvalue(),
     file_name="translate-PL.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
