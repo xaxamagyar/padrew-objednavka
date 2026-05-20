@@ -1,6 +1,6 @@
 import io
 import re
-import urllib.request
+import os
 import pandas as pd
 import streamlit as st
 
@@ -16,69 +16,78 @@ from reportlab.pdfbase.ttfonts import TTFont
 st.set_page_config(page_title="Objednávky & Štítky", page_icon="📦", layout="wide")
 st.title("📦 Automatizace Objednávky & Štítky")
 
+# Pevný název lokálního souboru - přesně jako v tvém funkčním projektu
+EXCEL_SOUBOR = "translate-PL.xlsx"
+
 # ==============================================================================
-# 🔤 NAČTENÍ FONTŮ PŘÍMO Z TVÉHO GITHUBŪ
+# 🔤 NAČTENÍ FONTŮ Z LOKÁLNÍHO ADRESÁŘE (POUŽIJE TVÉ NAHRANÉ SOUBORY)
 # ==============================================================================
 @st.cache_resource
-def nacist_fonty_z_vlastniho_githubu():
+def nacist_fonty_lokalne():
     try:
-        url_normal = "https://raw.githubusercontent.com/xaxamagyar/padrew-objednavka/main/ARIAL.TTF"
-        url_bold = "https://raw.githubusercontent.com/xaxamagyar/padrew-objednavka/main/ARIALBD.TTF"
-        
-        req_normal = urllib.request.urlopen(url_normal)
-        req_bold = urllib.request.urlopen(url_bold)
-        
-        pdfmetrics.registerFont(TTFont('Padrew-Arial', io.BytesIO(req_normal.read())))
-        pdfmetrics.registerFont(TTFont('Padrew-Arial-Bold', io.BytesIO(req_bold.read())))
+        # Použijeme tvé nahrané soubory s velkými písmeny, které máš v repozitáři
+        pdfmetrics.registerFont(TTFont('Padrew-Arial', 'ARIAL.TTF'))
+        pdfmetrics.registerFont(TTFont('Padrew-Arial-Bold', 'ARIALBD.TTF'))
         return 'Padrew-Arial', 'Padrew-Arial-Bold'
     except Exception as e:
-        st.warning(f"⚠ Nepodařilo se načíst fonty z GitHubu ({e}). Použije se Helvetica.")
+        st.warning(f"⚠ Nepodařilo se načíst lokální fonty ({e}). Použije se Helvetica.")
         return 'Helvetica', 'Helvetica-Bold'
 
-FONT_NORMAL, FONT_BOLD = nacist_fonty_z_vlastniho_githubu()
+FONT_NORMAL, FONT_BOLD = nacist_fonty_lokalne()
 
-# 🔗 RAW ODKAZ NA EXCEL Z TVÉHO GITHUBŪ
-GITHUB_EXCEL_URL = "https://raw.githubusercontent.com/xaxamagyar/padrew-objednavka/main/translate-PL.xlsx"
+# ==============================================================================
+# 📥 FUNKCE PRO NAČÍTÁNÍ A UKLÁDÁNÍ - PŘESNĚ PODLE TVÉHO TOPTRANS VZORU
+# ==============================================================================
+def nacist_kompletni_databazi():
+    all_sheets = {}
+    if os.path.exists(EXCEL_SOUBOR):
+        try:
+            excel_file = pd.ExcelFile(EXCEL_SOUBOR)
+            for sheet in excel_file.sheet_names:
+                # Vynutíme typ textu (str), aby prázdné záložky u KOPERA nepadaly na float64
+                df_sheet = pd.read_excel(EXCEL_SOUBOR, sheet_name=sheet, dtype=str)
+                df_sheet = df_sheet.fillna("").astype(str)
+                for col in df_sheet.columns:
+                    df_sheet[col] = df_sheet[col].str.strip()
+                all_sheets[sheet] = df_sheet
+        except Exception as e:
+            st.error(f"❌ Chyba při čtení souboru {EXCEL_SOUBOR}: {e}")
+    return all_sheets
+
+def ulozit_kompletni_databazi(sheets_dict):
+    try:
+        with pd.ExcelWriter(EXCEL_SOUBOR, engine='openpyxl') as writer:
+            for s_name, df_s in sheets_dict.items():
+                df_s.to_excel(writer, sheet_name=s_name, index=False)
+        st.toast("✨ Změny úspěšně a trvale uloženy do souboru!", icon="💾")
+    except Exception as e:
+        st.error(f"❌ Selhalo fyzické uložení souboru: {e}")
+
+# Načtení databáze do session_state při prvním spuštění
+if "all_sheets" not in st.session_state or not st.session_state.all_sheets:
+    st.session_state.all_sheets = nacist_kompletni_databazi()
 
 # --- 1. VÝBĚR DODAVATELE ---
 st.sidebar.header("⚙️ Nastavení dodavatele")
 DODAVATEL = st.sidebar.selectbox("Vyberte dodavatele:", ["PADREW", "KOPER"])
 
-st.write(f"Aplikace čerpá překlady pro dodavatele **{DODAVATEL}** z GitHubu. Nahrajte objednávky.")
+st.write(f"Aplikace pracuje s databází pro dodavatele **{DODAVATEL}**. Nahrajte objednávky.")
 
-# Inicializace vnitřní paměti pro VŠECHNY listy najednou
-if "all_sheets" not in st.session_state:
-    st.session_state.all_sheets = {}
-
-# --- AUTOMATICKÉ NAČTENÍ KOMPLETNÍHO EXCELU JAKO ČISTÝ TEXT (ŘEŠÍ CHYBU FLOAT64) ---
-if not st.session_state.all_sheets:
-    try:
-        with st.spinner("🔄 Načítám kompletní překladovou databázi z GitHubu..."):
-            excel_file = pd.ExcelFile(GITHUB_EXCEL_URL)
-            for sheet in excel_file.sheet_names:
-                # Vynutíme typ textu (str) pro absolutně všechny buňky, aby prázdná políčka nepadala
-                df_sheet = pd.read_excel(GITHUB_EXCEL_URL, sheet_name=sheet, dtype=str)
-                df_sheet = df_sheet.fillna("").astype(str)
-                for col in df_sheet.columns:
-                    df_sheet[col] = df_sheet[col].str.strip()
-                
-                st.session_state.all_sheets[sheet] = df_sheet
-            st.toast("✔ Databáze kompletně načtena z GitHubu!", icon="📥")
-    except Exception as e:
-        st.error(f"❌ Chyba při stahování Excelu z GitHubu: {e}")
-        st.stop()
-
-# Dynamické přiřazení listů podle vybraného dodavatele
+# Dynamické určení záložek podle zvoleného dodavatele
 sheet_data = f"DATA-{DODAVATEL}"
 sheet_var = f"VAR-{DODAVATEL}"
 
-# Pojistky pro případ chybějících listů na GitHubu
+# Pojistky pro případ chybějících nebo prázdných záložek v souboru
 if sheet_data not in st.session_state.all_sheets:
     st.session_state.all_sheets[sheet_data] = pd.DataFrame(columns=["název", "PL"]).astype(str)
 if sheet_var not in st.session_state.all_sheets:
     st.session_state.all_sheets[sheet_var] = pd.DataFrame(columns=["VAR", "PL"]).astype(str)
 if "LABELS" not in st.session_state.all_sheets:
     st.session_state.all_sheets["LABELS"] = pd.DataFrame(columns=["NAME", "PCS"]).astype(str)
+
+df_trans_prod = st.session_state.all_sheets[sheet_data]
+df_trans_var = st.session_state.all_sheets[sheet_var]
+df_labels = st.session_state.all_sheets["LABELS"]
 
 # --- BOČNÍ PANEL: NAHRÁNÍ OBJEDNÁVEK ---
 st.sidebar.markdown("---")
@@ -94,7 +103,7 @@ if uploaded_orders1:
             seznam_df_orders.append(pd.read_excel(uploaded_orders2))
         df_orders = pd.concat(seznam_df_orders, ignore_index=True)
 
-        # Filtrace podle aktuálně vybraného dodavatele
+        # Filtrace podle vybraného dodavatele
         filtr = (
             (df_orders["orderItemType"] == "product")
             & (df_orders["orderItemSupplier"] == DODAVATEL)
@@ -129,16 +138,19 @@ if uploaded_orders1:
             df_check["orderItemName"] = df_check["orderItemName"].astype(str).str.strip()
             df_check["orderItemVariantName"] = df_check["orderItemVariantName"].fillna("").astype(str).str.strip()
 
-            # Textové slovníky z paměti aplikace
-            slovnik_prod = dict(zip(st.session_state.all_sheets[sheet_data]["název"], st.session_state.all_sheets[sheet_data]["PL"]))
-            slovnik_var = dict(zip(st.session_state.all_sheets[sheet_var]["VAR"], st.session_state.all_sheets[sheet_var]["PL"]))
-            slovnik_lab = dict(zip(st.session_state.all_sheets["LABELS"]["NAME"], st.session_state.all_sheets["LABELS"]["PCS"]))
+            # Načtení slovníků z paměti aplikace
+            slovnik_prod = dict(zip(df_trans_prod["název"], df_trans_prod["PL"]))
+            slovnik_var = dict(zip(df_trans_var["VAR"], df_trans_var["PL"]))
+            slovnik_lab = dict(zip(df_labels["NAME"], df_labels["PCS"]))
 
             df_check["orderItemName_PL"] = df_check["orderItemName"].map(slovnik_prod).fillna("")
             df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName"].map(slovnik_var).fillna("")
             df_check.loc[df_check["orderItemVariantName"] == "", "orderItemVariantName_PL"] = ""
 
-            # Detekce chybějících překladů
+            df_check["orderItemName_PL"] = df_check["orderItemName_PL"].replace("", None).fillna("")
+            df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName_PL"].replace("", None).fillna("")
+
+            # Detekce chybějících položek
             chybi_prod = df_check[df_check["orderItemName_PL"] == ""]["orderItemName"].unique()
             chybi_var = df_check[(df_check["orderItemVariantName_PL"] == "") & (df_check["orderItemVariantName"] != "")]["orderItemVariantName"].unique()
 
@@ -151,9 +163,9 @@ if uploaded_orders1:
             df_check["baliky_pcs"] = df_check["orderItemName_PL_clean"].map(slovnik_lab).fillna("")
             chybi_lab = df_check[(df_check["baliky_pcs"] == "") & (df_check["orderItemName_PL_clean"] != "")]["orderItemName_PL_clean"].unique()
 
-            # --- AUTOFILS FORMULÁŘE PRO CHYBĚJÍCÍ POLOŽKY ---
+            # --- DYNAMICKÉ FORMULÁŘE S OKAMŽITÝM ZÁPISEM DO SOUBORU ---
             if len(chybi_prod) > 0 or len(chybi_var) > 0 or len(chybi_lab) > 0:
-                st.error(f"🛑 V online databázi ({DODAVATEL}) chybí položky! Vyplňte je zde:")
+                st.error(f"🛑 V databázi ({DODAVATEL}) chybí položky! Vyplňte je zde:")
                 
                 if len(chybi_prod) > 0:
                     st.warning("➕ Chybějící PŘEKLADY PRODUKTŮ:")
@@ -161,10 +173,11 @@ if uploaded_orders1:
                         with st.form(key=f"form_prod_{i}"):
                             st.write(f"Produkt z e-shopu: **{p_cz}**")
                             p_pl = st.text_input("Zadejte polský kód/překlad:", key=f"in_prod_{i}")
-                            if st.form_submit_button("Přidat produkt"):
+                            if st.form_submit_button("Přidat a uložit"):
                                 if p_pl:
                                     novy_radek = pd.DataFrame([{"název": str(p_cz), "PL": str(p_pl.strip())}]).astype(str)
                                     st.session_state.all_sheets[sheet_data] = pd.concat([st.session_state.all_sheets[sheet_data], novy_radek], ignore_index=True)
+                                    ulozit_kompletni_databazi(st.session_state.all_sheets)
                                     st.rerun()
 
                 if len(chybi_var) > 0:
@@ -173,10 +186,11 @@ if uploaded_orders1:
                         with st.form(key=f"form_var_{i}"):
                             st.write(f"Varianta z e-shopu: **{v_cz}**")
                             v_pl = st.text_input("Zadejte polský překlad varianty:", key=f"in_var_{i}")
-                            if st.form_submit_button("Přidat variantu"):
+                            if st.form_submit_button("Přidat a uložit"):
                                 if v_pl:
                                     novy_radek = pd.DataFrame([{"VAR": str(v_cz), "PL": str(v_pl.strip())}]).astype(str)
                                     st.session_state.all_sheets[sheet_var] = pd.concat([st.session_state.all_sheets[sheet_var], novy_radek], ignore_index=True)
+                                    ulozit_kompletni_databazi(st.session_state.all_sheets)
                                     st.rerun()
 
                 if len(chybi_lab) > 0 and len(chybi_prod) == 0:
@@ -185,9 +199,10 @@ if uploaded_orders1:
                         with st.form(key=f"form_lab_{i}"):
                             st.write(f"Polský název produktu: **{l_pl}**")
                             l_pcs = st.number_input("Počet krabic (PCS):", min_value=1, max_value=20, value=2, key=f"in_lab_{i}")
-                            if st.form_submit_button("Přidat počet balíků"):
+                            if st.form_submit_button("Přidat a uložit"):
                                 novy_radek = pd.DataFrame([{"NAME": str(l_pl), "PCS": str(int(l_pcs))}]).astype(str)
                                 st.session_state.all_sheets["LABELS"] = pd.concat([st.session_state.all_sheets["LABELS"], novy_radek], ignore_index=True)
+                                ulozit_kompletni_databazi(st.session_state.all_sheets)
                                 st.rerun()
                 st.stop()
 
@@ -195,7 +210,6 @@ if uploaded_orders1:
             df_final = df_check.copy()
             df_final["baliky_pcs"] = pd.to_numeric(df_final["baliky_pcs"], errors='coerce').fillna(1).astype(int)
             df_final["orderItemVariantName_PL_clean"] = df_final["orderItemVariantName_PL_clean"].str.replace(r",?\s*\+?\s*SZ", "", case=False, regex=True).str.strip(", ").str.strip()
-
             df_final = df_final.sort_values(by=["orderItemName_PL_clean", "orderItemVariantName_PL_clean"], ascending=True)
 
             def sestav_radek(row):
@@ -222,7 +236,6 @@ if uploaded_orders1:
                 style_main = ParagraphStyle('Main', parent=styles['Normal'], fontName=FONT_BOLD, fontSize=11, leading=13)
                 style_pl = ParagraphStyle('PL', parent=styles['Normal'], fontName=FONT_NORMAL, fontSize=8.5, leading=10, textColor=colors.HexColor('#555555'))
 
-                # ⭐ DŮLEŽITÁ ÚPRAVA: TVŮJ NOVÝ SEZNAM FRÁZÍ KE SMAZÁNÍ
                 fraze_ke_smazani = ["Zvolte barvu:: ", "Zvolte rozměr:: ", "Zvolte variantu:: ", "Barva: ", "Rozměr: "]
                 
                 bunky_stitku = []
@@ -232,13 +245,9 @@ if uploaded_orders1:
                     
                     for i_postele in range(1, mnozstvi_objednano + 1):
                         for a_balik in range(1, baliku_na_produkt + 1):
-                            
-                            # ⭐ Odmazání předpon z Shoptetu z textu české varianty
                             cz_var_cista = cz_var
                             for fraze in fraze_ke_smazani:
                                 cz_var_cista = re.sub(re.escape(fraze), "", cz_var_cista, flags=re.IGNORECASE)
-                            
-                            # Výsledné začištění (vymaže přebytečné čárky a mezery na krajích)
                             cz_var_cista = cz_var_cista.replace(", ,", ",").strip(", ").strip()
                             
                             cz_text = f"{cz_nazev} - {cz_var_cista}" if cz_var_cista else cz_nazev
@@ -247,18 +256,11 @@ if uploaded_orders1:
                             horni_tab = Table([[Paragraph(f"OBJEDNÁVKA: {kod}", style_top_left), Paragraph(f"Balík: {a_balik} z {baliku_na_produkt}", style_top_right)]], colWidths=[48*mm, 44*mm])
                             horni_tab.setStyle(TableStyle([('LEFTPADDING', (0,0), (-1,-1), 0), ('RIGHTPADDING', (0,0), (-1,-1), 0), ('BOTTOMPADDING', (0,0), (-1,-1), 0), ('TOPPADDING', (0,0), (-1,-1), 0)]))
                             
-                            bunky_stitku.append([
-                                horni_tab, 
-                                Spacer(1, 1.5*mm), 
-                                Paragraph(cz_text, style_main), 
-                                Spacer(1, 1*mm), 
-                                Paragraph(pl_text, style_pl)
-                            ])
+                            bunky_stitku.append([horni_tab, Spacer(1, 1.5*mm), Paragraph(cz_text, style_main), Spacer(1, 1*mm), Paragraph(pl_text, style_pl)])
 
                 data_mrizky = []
                 docasny_radek = []
-                while len(bunky_stitku) % 14 != 0: 
-                    bunky_stitku.append("")
+                while len(bunky_stitku) % 14 != 0: bunky_stitku.append("")
                 for stitek in bunky_stitku:
                     docasny_radek.append(stitek)
                     if len(docasny_radek) == 2:
@@ -267,8 +269,7 @@ if uploaded_orders1:
                         
                 mrizka_tabulka = Table(data_mrizky, colWidths=[102*mm, 102*mm], rowHeights=[41.7*mm]*len(data_mrizky))
                 t_style = [('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING', (0,0), (-1,-1), 2.5*mm), ('RIGHTPADDING', (0,0), (-1,-1), 2.5*mm), ('TOPPADDING', (0,0), (-1,-1), 2.5*mm), ('BOTTOMPADDING', (0,0), (-1,-1), 1.5*mm), ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#DDDDDD')), ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#DDDDDD'))]
-                for r in range(7, len(data_mrizky), 7): 
-                    t_style.append(('PAGEBREAK', (0, r-1), (-1, r-1)))
+                for r in range(7, len(data_mrizky), 7): t_style.append(('PAGEBREAK', (0, r-1), (-1, r-1)))
                 mrizka_tabulka.setStyle(TableStyle(t_style))
                 doc.build([mrizka_tabulka])
 
@@ -278,7 +279,7 @@ if uploaded_orders1:
     except Exception as e:
         st.error(f"❌ Chyba při zpracování objednávek: {e}")
 
-# --- ŽIVÁ SPRÁVA DATABÁZE ---
+# --- ŽIVÁ SPRÁVA DATABÁZE V PROHLÍŽEČI ---
 st.markdown("---")
 st.subheader(f"⚙️ Živá správa překladů pro list: {sheet_data} a {sheet_var}")
 
@@ -290,18 +291,7 @@ with tab2:
 with tab3:
     st.session_state.all_sheets["LABELS"] = st.data_editor(st.session_state.all_sheets["LABELS"], num_rows="dynamic", use_container_width=True, key="edit_lab_global")
 
-st.markdown("### 💾 Stažení kompletního aktualizovaného Excelu")
-st.write("Po jakýchkoliv úpravách stáhněte tento soubor a nahrajte jej zpět na GitHub repozitář. Budou v něm stoprocentně zachováni všichni dodavatelé.")
-
-export_buffer = io.BytesIO()
-with pd.ExcelWriter(export_buffer, engine='openpyxl') as writer:
-    # Uložíme všechny dostupné listy z paměti aplikace najednou, aby se žádný dodavatel nesmazal
-    for s_name, df_s in st.session_state.all_sheets.items():
-        df_s.to_excel(writer, sheet_name=s_name, index=False)
-        
-st.download_button(
-    label="📥 STÁHNOUT SOUBOR TRANSLATE-PL.XLSX SE ZMĚNAMI",
-    data=export_buffer.getvalue(),
-    file_name="translate-PL.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+# Manuální tlačítko pro uložení změn provedených v tabulkách přímo na disk serveru
+if st.button("💾 TRVALE ZAPSAT VŠECHNY ZMĚNY Z TABULEK"):
+    ulozit_kompletni_databazi(st.session_state.all_sheets)
+    st.rerun()
