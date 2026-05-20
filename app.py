@@ -207,7 +207,7 @@ if uploaded_orders1 and st.session_state.df_trans_prod is not None:
                 style_pl = ParagraphStyle('PL', parent=styles['Normal'], fontName=FONT_NORMAL, fontSize=8.5, leading=10, textColor=colors.HexColor('#555555'))
 
                 # OČIŠTĚNÍ OD BALASTU (FRÁZE KE SMAZÁNÍ)
-                fraze_ke_smazani = ["se zásuvkou", "s úložným prostorem", "včetně roštu", " matrace"]
+                fraze_ke_smazani = ["Zvolte barvu:: ", "Zvolte rozměr:: ", "Zvolte variantu:: ", "Barva: ", "Rozměr: ",]
                 
                 bunky_stitku = []
                 for _, row in df_final.iterrows():
@@ -224,7 +224,7 @@ if uploaded_orders1 and st.session_state.df_trans_prod is not None:
                             cz_var_cista = cz_var_cista.replace(", ,", ",").strip(", ").strip()
                             
                             cz_text = f"{cz_nazev} - {cz_var_cista}" if cz_var_cista else cz_nazev
-                            pl_text = f"[PL: {pl_nazev}]"
+                            pl_text = f"[{pl_nazev}]"
                             
                             horni_tab = Table([[Paragraph(f"OBJEDNÁVKA: {kod}", style_top_left), Paragraph(f"Balík: {a_balik} z {baliku_na_produkt}", style_top_right)]], colWidths=[48*mm, 44*mm])
                             horni_tab.setStyle(TableStyle([('LEFTPADDING', (0,0), (-1,-1), 0), ('RIGHTPADDING', (0,0), (-1,-1), 0), ('BOTTOMPADDING', (0,0), (-1,-1), 0), ('TOPPADDING', (0,0), (-1,-1), 0)]))
