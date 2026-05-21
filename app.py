@@ -1,6 +1,8 @@
 import io
 import re
-import os
+import urllib.request
+import json
+import base64
 import pandas as pd
 import streamlit as st
 
@@ -14,70 +16,118 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 st.set_page_config(page_title="Objednávky & Štítky", page_icon="📦", layout="wide")
-st.title("📦 Automatizace Objednávky & Štítky")
+st.title("📦 Automatizace Objednávky & Štítky (Automatické ukládání)")
 
-# Pevný název lokálního souboru - přesně jako v tvém funkčním projektu
-EXCEL_SOUBOR = "translate-PL.xlsx"
+# Nastavení tvého repozitáře a souboru na GitHubu
+REPO = "xaxamagyar/padrew-objednavka"
+FILE_PATH = "translate-PL.xlsx"
+
+# Bezpečné načtení tokenu ze Streamlit Secrets
+TOKEN = st.secrets.get("GITHUB_TOKEN", "")
 
 # ==============================================================================
-# 🔤 NAČTENÍ FONTŮ Z LOKÁLNÍHO ADRESÁŘE (POUŽIJE TVÉ NAHRANÉ SOUBORY)
+# 🔤 NAČTENÍ FONTŮ PŘÍMO Z TVÉHO GITHUBŪ
 # ==============================================================================
 @st.cache_resource
-def nacist_fonty_lokalne():
+def nacist_fonty_z_vlastniho_githubu():
     try:
-        # Použijeme tvé nahrané soubory s velkými písmeny, které máš v repozitáři
-        pdfmetrics.registerFont(TTFont('Padrew-Arial', 'ARIAL.TTF'))
-        pdfmetrics.registerFont(TTFont('Padrew-Arial-Bold', 'ARIALBD.TTF'))
+        url_normal = f"https://raw.githubusercontent.com/{REPO}/main/ARIAL.TTF"
+        url_bold = f"https://raw.githubusercontent.com/{REPO}/main/ARIALBD.TTF"
+        
+        req_normal = urllib.request.urlopen(url_normal)
+        req_bold = urllib.request.urlopen(url_bold)
+        
+        pdfmetrics.registerFont(TTFont('Padrew-Arial', io.BytesIO(req_normal.read())))
+        pdfmetrics.registerFont(TTFont('Padrew-Arial-Bold', io.BytesIO(req_bold.read())))
         return 'Padrew-Arial', 'Padrew-Arial-Bold'
     except Exception as e:
-        st.warning(f"⚠ Nepodařilo se načíst lokální fonty ({e}). Použije se Helvetica.")
+        st.warning(f"⚠ Nepodařilo se načíst fonty z GitHubu ({e}). Použije se Helvetica.")
         return 'Helvetica', 'Helvetica-Bold'
 
-FONT_NORMAL, FONT_BOLD = nacist_fonty_lokalne()
+FONT_NORMAL, FONT_BOLD = nacist_fonty_z_vlastniho_githubu()
+
+# Odkaz pro čtení Excelu z internetu
+GITHUB_EXCEL_URL = f"https://raw.githubusercontent.com/{REPO}/main/{FILE_PATH}"
 
 # ==============================================================================
-# 📥 FUNKCE PRO NAČÍTÁNÍ A UKLÁDÁNÍ - PŘESNĚ PODLE TVÉHO TOPTRANS VZORU
+# 💾 AUTOMATICKÝ ZÁPIS AKTUALIZOVANÉHO EXCELU PŘÍMO NA TVŮJ GITHUB (PŘES API)
 # ==============================================================================
-def nacist_kompletni_databazi():
-    all_sheets = {}
-    if os.path.exists(EXCEL_SOUBOR):
-        try:
-            excel_file = pd.ExcelFile(EXCEL_SOUBOR)
-            for sheet in excel_file.sheet_names:
-                # Vynutíme typ textu (str), aby prázdné záložky u KOPERA nepadaly na float64
-                df_sheet = pd.read_excel(EXCEL_SOUBOR, sheet_name=sheet, dtype=str)
-                df_sheet = df_sheet.fillna("").astype(str)
-                for col in df_sheet.columns:
-                    df_sheet[col] = df_sheet[col].str.strip()
-                all_sheets[sheet] = df_sheet
-        except Exception as e:
-            st.error(f"❌ Chyba při čtení souboru {EXCEL_SOUBOR}: {e}")
-    return all_sheets
-
-def ulozit_kompletni_databazi(sheets_dict):
+def uloz_excel_přímo_na_github():
+    if not TOKEN:
+        st.error("❌ V nastavení Streamlit Secrets chybí 'GITHUB_TOKEN'. Automatické ukládání je vypnuté.")
+        return
+    
     try:
-        with pd.ExcelWriter(EXCEL_SOUBOR, engine='openpyxl') as writer:
-            for s_name, df_s in sheets_dict.items():
+        # 1. Vygenerujeme nový Excel v paměti se všemi záložkami (nic se nepromaže)
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            for s_name, df_s in st.session_state.all_sheets.items():
                 df_s.to_excel(writer, sheet_name=s_name, index=False)
-        st.toast("✨ Změny úspěšně a trvale uloženy do souboru!", icon="💾")
+        content_bytes = excel_buffer.getvalue()
+        
+        # 2. Zjistíme aktuální SHA kód souboru z GitHubu (vyžadováno API pro přepis)
+        url_api = f"https://api.github.com/repos/{REPO}/contents/{FILE_PATH}"
+        req_get = urllib.request.Request(url_api)
+        req_get.add_header("Authorization", f"token {TOKEN}")
+        
+        sha = ""
+        try:
+            with urllib.request.urlopen(req_get) as response:
+                res_data = json.loads(response.read().decode())
+                sha = res_data["sha"]
+        except Exception:
+            pass # Pokud soubor na GitHubu ještě neexistuje
+            
+        # 3. Odešleme aktualizovaný soubor zpět na GitHub přes PUT požadavek
+        payload = {
+            "message": "Automatická aktualizace překladové databáze z webové aplikace",
+            "content": base64.b64encode(content_bytes).decode('utf-8'),
+            "branch": "main"
+        }
+        if sha:
+            payload["sha"] = sha
+            
+        req_put = urllib.request.Request(url_api, data=json.dumps(payload).encode('utf-8'), method='PUT')
+        req_put.add_header("Authorization", f"token {TOKEN}")
+        req_put.add_header("Content-Type", "application/json")
+        
+        with urllib.request.urlopen(req_put) as response:
+            if response.status in [200, 201]:
+                st.toast("💾 Změny byly úspěšně a trvale zapsány přímo na tvůj GitHub!", icon="🚀")
     except Exception as e:
-        st.error(f"❌ Selhalo fyzické uložení souboru: {e}")
-
-# Načtení databáze do session_state při prvním spuštění
-if "all_sheets" not in st.session_state or not st.session_state.all_sheets:
-    st.session_state.all_sheets = nacist_kompletni_databazi()
+        st.error(f"❌ Selhal automatický zápis na GitHub přes API. Chyba: {e}")
 
 # --- 1. VÝBĚR DODAVATELE ---
 st.sidebar.header("⚙️ Nastavení dodavatele")
 DODAVATEL = st.sidebar.selectbox("Vyberte dodavatele:", ["PADREW", "KOPER"])
 
-st.write(f"Aplikace pracuje s databází pro dodavatele **{DODAVATEL}**. Nahrajte objednávky.")
+st.write(f"Aplikace čerpá překlady pro dodavatele **{DODAVATEL}** z GitHubu. Nahrajte objednávky.")
 
-# Dynamické určení záložek podle zvoleného dodavatele
+# Inicializace vnitřní paměti pro VŠECHNY listy najednou
+if "all_sheets" not in st.session_state:
+    st.session_state.all_sheets = {}
+
+# --- AUTOMATICKÉ NAČTENÍ KOMPLETNÍHO EXCELU JAKO ČISTÝ TEXT (ŘEŠÍ CHYBU FLOAT64) ---
+if not st.session_state.all_sheets:
+    try:
+        with st.spinner("🔄 Načítám kompletní překladovou databázi z GitHubu..."):
+            excel_file = pd.ExcelFile(GITHUB_EXCEL_URL)
+            for sheet in excel_file.sheet_names:
+                # Vynutíme typ textu (str) pro všechny sloupce, aby prázdná políčka u KOPERA nepadala na float64
+                df_sheet = pd.read_excel(GITHUB_EXCEL_URL, sheet_name=sheet, dtype=str)
+                df_sheet = df_sheet.fillna("").astype(str)
+                for col in df_sheet.columns:
+                    df_sheet[col] = df_sheet[col].str.strip()
+                st.session_state.all_sheets[sheet] = df_sheet
+            st.toast("✔ Databáze kompletně načtena z GitHubu!", icon="📥")
+    except Exception as e:
+        st.error(f"❌ Chyba při stahování Excelu z GitHubu: {e}")
+        st.stop()
+
+# Dynamické přiřazení záložek podle vybraného dodavatele
 sheet_data = f"DATA-{DODAVATEL}"
 sheet_var = f"VAR-{DODAVATEL}"
 
-# Pojistky pro případ chybějících nebo prázdných záložek v souboru
 if sheet_data not in st.session_state.all_sheets:
     st.session_state.all_sheets[sheet_data] = pd.DataFrame(columns=["název", "PL"]).astype(str)
 if sheet_var not in st.session_state.all_sheets:
@@ -85,6 +135,7 @@ if sheet_var not in st.session_state.all_sheets:
 if "LABELS" not in st.session_state.all_sheets:
     st.session_state.all_sheets["LABELS"] = pd.DataFrame(columns=["NAME", "PCS"]).astype(str)
 
+# Přiřazení lokálních tabulek pro editor
 df_trans_prod = st.session_state.all_sheets[sheet_data]
 df_trans_var = st.session_state.all_sheets[sheet_var]
 df_labels = st.session_state.all_sheets["LABELS"]
@@ -138,7 +189,7 @@ if uploaded_orders1:
             df_check["orderItemName"] = df_check["orderItemName"].astype(str).str.strip()
             df_check["orderItemVariantName"] = df_check["orderItemVariantName"].fillna("").astype(str).str.strip()
 
-            # Načtení slovníků z paměti aplikace
+            # Slovníky vytvořené z paměti aplikace (striktně textové)
             slovnik_prod = dict(zip(df_trans_prod["název"], df_trans_prod["PL"]))
             slovnik_var = dict(zip(df_trans_var["VAR"], df_trans_var["PL"]))
             slovnik_lab = dict(zip(df_labels["NAME"], df_labels["PCS"]))
@@ -150,7 +201,7 @@ if uploaded_orders1:
             df_check["orderItemName_PL"] = df_check["orderItemName_PL"].replace("", None).fillna("")
             df_check["orderItemVariantName_PL"] = df_check["orderItemVariantName_PL"].replace("", None).fillna("")
 
-            # Detekce chybějících položek
+            # Detekce chybějících překladů
             chybi_prod = df_check[df_check["orderItemName_PL"] == ""]["orderItemName"].unique()
             chybi_var = df_check[(df_check["orderItemVariantName_PL"] == "") & (df_check["orderItemVariantName"] != "")]["orderItemVariantName"].unique()
 
@@ -163,9 +214,9 @@ if uploaded_orders1:
             df_check["baliky_pcs"] = df_check["orderItemName_PL_clean"].map(slovnik_lab).fillna("")
             chybi_lab = df_check[(df_check["baliky_pcs"] == "") & (df_check["orderItemName_PL_clean"] != "")]["orderItemName_PL_clean"].unique()
 
-            # --- DYNAMICKÉ FORMULÁŘE S OKAMŽITÝM ZÁPISEM DO SOUBORU ---
+            # --- DYNAMICKÉ FORMULÁŘE S OKAMŽITÝM ZÁPISEM NA GITHUB ---
             if len(chybi_prod) > 0 or len(chybi_var) > 0 or len(chybi_lab) > 0:
-                st.error(f"🛑 V databázi ({DODAVATEL}) chybí položky! Vyplňte je zde:")
+                st.error(f"🛑 V online databázi ({DODAVATEL}) chybí položky! Vyplňte je zde:")
                 
                 if len(chybi_prod) > 0:
                     st.warning("➕ Chybějící PŘEKLADY PRODUKTŮ:")
@@ -173,11 +224,11 @@ if uploaded_orders1:
                         with st.form(key=f"form_prod_{i}"):
                             st.write(f"Produkt z e-shopu: **{p_cz}**")
                             p_pl = st.text_input("Zadejte polský kód/překlad:", key=f"in_prod_{i}")
-                            if st.form_submit_button("Přidat a uložit"):
+                            if st.form_submit_button("Přidat a odeslat na GitHub"):
                                 if p_pl:
                                     novy_radek = pd.DataFrame([{"název": str(p_cz), "PL": str(p_pl.strip())}]).astype(str)
                                     st.session_state.all_sheets[sheet_data] = pd.concat([st.session_state.all_sheets[sheet_data], novy_radek], ignore_index=True)
-                                    ulozit_kompletni_databazi(st.session_state.all_sheets)
+                                    uloz_excel_přímo_na_github()
                                     st.rerun()
 
                 if len(chybi_var) > 0:
@@ -186,11 +237,11 @@ if uploaded_orders1:
                         with st.form(key=f"form_var_{i}"):
                             st.write(f"Varianta z e-shopu: **{v_cz}**")
                             v_pl = st.text_input("Zadejte polský překlad varianty:", key=f"in_var_{i}")
-                            if st.form_submit_button("Přidat a uložit"):
+                            if st.form_submit_button("Přidat a odeslat na GitHub"):
                                 if v_pl:
                                     novy_radek = pd.DataFrame([{"VAR": str(v_cz), "PL": str(v_pl.strip())}]).astype(str)
                                     st.session_state.all_sheets[sheet_var] = pd.concat([st.session_state.all_sheets[sheet_var], novy_radek], ignore_index=True)
-                                    ulozit_kompletni_databazi(st.session_state.all_sheets)
+                                    uloz_excel_přímo_na_github()
                                     st.rerun()
 
                 if len(chybi_lab) > 0 and len(chybi_prod) == 0:
@@ -199,10 +250,10 @@ if uploaded_orders1:
                         with st.form(key=f"form_lab_{i}"):
                             st.write(f"Polský název produktu: **{l_pl}**")
                             l_pcs = st.number_input("Počet krabic (PCS):", min_value=1, max_value=20, value=2, key=f"in_lab_{i}")
-                            if st.form_submit_button("Přidat a uložit"):
+                            if st.form_submit_button("Přidat a odeslat na GitHub"):
                                 novy_radek = pd.DataFrame([{"NAME": str(l_pl), "PCS": str(int(l_pcs))}]).astype(str)
                                 st.session_state.all_sheets["LABELS"] = pd.concat([st.session_state.all_sheets["LABELS"], novy_radek], ignore_index=True)
-                                ulozit_kompletni_databazi(st.session_state.all_sheets)
+                                uloz_excel_přímo_na_github()
                                 st.rerun()
                 st.stop()
 
@@ -236,6 +287,7 @@ if uploaded_orders1:
                 style_main = ParagraphStyle('Main', parent=styles['Normal'], fontName=FONT_BOLD, fontSize=11, leading=13)
                 style_pl = ParagraphStyle('PL', parent=styles['Normal'], fontName=FONT_NORMAL, fontSize=8.5, leading=10, textColor=colors.HexColor('#555555'))
 
+                # ⭐ ZAČIŠTĚNÍ TEXTŮ PODLE TVÉHO NOVÉHO POŽADAVKU
                 fraze_ke_smazani = ["Zvolte barvu:: ", "Zvolte rozměr:: ", "Zvolte variantu:: ", "Barva: ", "Rozměr: "]
                 
                 bunky_stitku = []
@@ -291,7 +343,6 @@ with tab2:
 with tab3:
     st.session_state.all_sheets["LABELS"] = st.data_editor(st.session_state.all_sheets["LABELS"], num_rows="dynamic", use_container_width=True, key="edit_lab_global")
 
-# Manuální tlačítko pro uložení změn provedených v tabulkách přímo na disk serveru
-if st.button("💾 TRVALE ZAPSAT VŠECHNY ZMĚNY Z TABULEK"):
-    ulozit_kompletni_databazi(st.session_state.all_sheets)
-    st.rerun()
+# Tlačítko pro trvalé propsání změn z tabulek přímo na GitHub
+if st.button("💾 TRVALE ZAPSAT VŠECHNY ZMĚNY Z TABULEK NA GITHUB"):
+    uloz_excel_přímo_na_github()
