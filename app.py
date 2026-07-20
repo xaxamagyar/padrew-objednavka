@@ -165,15 +165,26 @@ if uploaded_orders1:
         if df_filtrovane.empty:
             st.warning(f"ℹ Žádné nevyřízené objednávky pro dodavatele: {DODAVATEL}")
         else:
-            # Sloučení šuplíků k postelím
-            je_samostatny_suplik = df_filtrovane["orderItemName"].str.contains(r"Zásuvka|šuplík", case=False, na=False)
+            # Sloučení samostatných šuplíků k postelím
+            # (Samostatný šuplík obsahuje 'Zásuvka' nebo 'šuplík', ale NEobsahuje 'postel')
+            je_samostatny_suplik = (
+                df_filtrovane["orderItemName"].str.contains(r"Zásuvka|šuplík", case=False, na=False) &
+                ~df_filtrovane["orderItemName"].str.contains(r"postel", case=False, na=False)
+            )
             objednavky_se_suplikem = df_filtrovane[je_samostatny_suplik]["code"].unique()
             radky_ke_smazani = []
 
             for kod_objednavky in objednavky_se_suplikem:
                 df_objednavka = df_filtrovane[df_filtrovane["code"] == kod_objednavky]
-                indexy_posteli = df_objednavka[~df_objednavka["orderItemName"].str.contains(r"Zásuvka|šuplík", case=False, na=False)].index
-                indexy_supliku = df_objednavka[df_objednavka["orderItemName"].str.contains(r"Zásuvka|šuplík", case=False, na=False)].index
+                
+                # Postel je položka obsahující slovo 'postel'
+                indexy_posteli = df_objednavka[df_objednavka["orderItemName"].str.contains(r"postel", case=False, na=False)].index
+                
+                # Samostatný šuplík neobsahuje slovo 'postel'
+                indexy_supliku = df_objednavka[
+                    df_objednavka["orderItemName"].str.contains(r"Zásuvka|šuplík", case=False, na=False) &
+                    ~df_objednavka["orderItemName"].str.contains(r"postel", case=False, na=False)
+                ].index
 
                 if len(indexy_posteli) > 0 and len(indexy_supliku) > 0:
                     puvodni_nazev = df_filtrovane.loc[indexy_posteli[0], "orderItemName"]
